@@ -2,6 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
+from unittest.mock import patch
+import urllib.error
+from buff_like import ApiError, run_console
 from buff_like import Bridge
 
 
@@ -23,6 +26,24 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Ambiguous'):
             restarted.tick()
         restarted.request.assert_not_called()
+
+    def test_login_error_identifies_web_without_response_secrets(self):
+        self.bridge.remote.open = Mock(side_effect=urllib.error.HTTPError(
+            'https://example.com/api/v1/auth/login', 401, 'secret body', {}, None))
+        with self.assertRaisesRegex(ApiError, 'WEB backend.*HTTP 401') as error:
+            self.bridge.login('admin@example.com', 'do-not-log-password')
+        self.assertNotIn('do-not-log-password', str(error.exception))
+        self.assertNotIn('secret body', str(error.exception))
+
+    def test_packaged_console_waits_after_failure(self):
+        with patch('buff_like.main', side_effect=ApiError('ENGINE unavailable')), \
+             patch('buff_like.sys.frozen', True, create=True), \
+             patch('buff_like.sys.argv', ['ChaySKBuffLike.exe']), \
+             patch.dict('os.environ', {'LOCALAPPDATA': self.tmp.name}), \
+             patch('builtins.input', return_value='') as prompt:
+            run_console()
+        prompt.assert_called_once()
+        self.assertIn('ENGINE unavailable', (Path(self.tmp.name) / 'ChaySKBuffLike' / 'diagnostics.log').read_text())
 
     def test_done_below_quota_is_review_not_completion(self):
         self.bridge.state['active']['engineId'] = 'engine'

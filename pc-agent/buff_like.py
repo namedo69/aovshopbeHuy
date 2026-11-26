@@ -3,12 +3,33 @@ import argparse
 import getpass
 import json
 import os
+import ssl
+import socket
+import sys
+from datetime import datetime
 from pathlib import Path
 import time
 import urllib.request
 import urllib.error
 import urllib.parse
 import uuid
+
+
+class ApiError(RuntimeError):
+    pass
+
+
+def describe_network_error(error):
+    reason = getattr(error, 'reason', error)
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return 'HTTPS certificate invalid. Check Windows clock and server certificate.'
+    if isinstance(reason, ssl.SSLError):
+        return 'TLS connection failed. Check VPN/proxy and Windows certificates.'
+    if isinstance(reason, socket.gaierror):
+        return 'DNS lookup failed. Check Internet and DNS.'
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return 'Connection timed out.'
+    return 'Connection failed. Check engine API port, Internet, firewall or proxy.'
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -44,8 +65,25 @@ class Bridge:
             headers['Authorization'] = 'Bearer ' + self.token
         req = urllib.request.Request((self.engine if engine else self.backend) + path,
             data=None if data is None else json.dumps(data).encode(), headers=headers)
-        with (self.local if engine else self.remote).open(req, timeout=20) as response:
-            result = json.load(response)
+        source = 'ENGINE localhost' if engine else 'WEB backend'
+        try:
+            with (self.local if engine else self.remote).open(req, timeout=20) as response:
+                result = json.load(response)
+        except urllib.error.HTTPError as exc:
+            hint = {
+                401: 'Check engine license.' if engine else 'Wrong login or expired session.',
+                403: 'Access denied; check admin permissions or engine license.',
+                404: 'Wrong API port/path or backend version.',
+                409: 'Order conflict; inspect existing claim/engine before retrying.',
+                429: 'Too many requests; wait before logging in again.',
+            }.get(exc.code, 'Server returned an error.')
+            status = exc.code
+            exc.close()
+            raise ApiError(f'{source} {path}: HTTP {status}. {hint}') from None
+        except (urllib.error.URLError, OSError) as exc:
+            raise ApiError(f'{source} {path}: {describe_network_error(exc)}') from None
+        except (ValueError, UnicodeError):
+            raise ApiError(f'{source} {path}: response is not valid JSON; check API address.') from None
         if not isinstance(result, (dict, list)) or (isinstance(result, dict) and result.get('ok') is False):
             raise RuntimeError('Invalid API response')
         return result
@@ -152,7 +190,9 @@ def main():
         bridge = Bridge(args.backend, args.port, args.state)
         email = input('Admin email: ').strip()
         password = getpass.getpass('Admin password: ')
+        print('Connecting to WEB backend...', flush=True)
         bridge.login(email, password)
+        print('WEB login OK (admin). Checking ENGINE localhost port ' + str(args.port) + '...', flush=True)
         bridge.validate_engine()
         print('Connected. Ctrl+C stops receiver, not the engine. Keep journal for recovery.')
         logged_in = time.monotonic()
@@ -162,13 +202,38 @@ def main():
                     bridge.login(email, password)
                     logged_in = time.monotonic()
                 bridge.tick()
-            except urllib.error.HTTPError as exc:
-                print(f'HTTP {exc.code}; receiver stopped. Resume with same journal after checking server/engine.')
-                break
             except (urllib.error.URLError, TimeoutError):
                 print('Connection interrupted; retaining journal. Retry in 5 seconds.')
             time.sleep(5)
 
 
+def run_console():
+    try:
+        main()
+    except KeyboardInterrupt:
+        print('\nReceiver stopped. Engine may still be running; journal retained.')
+    except Exception as error:
+        # Never record request bodies, passwords, access tokens or raw network errors.
+        detail = str(error) if isinstance(error, (ApiError, RuntimeError)) else (
+            describe_network_error(error) if isinstance(error, OSError)
+            else f'{type(error).__name__}: unable to continue; check configuration and journal.')
+        print('\nERROR: ' + detail, flush=True)
+        print('No automatic resubmit. Keep state.json. Check the error before reopening.', flush=True)
+        log = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'ChaySKBuffLike' / 'diagnostics.log'
+        try:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with log.open('a', encoding='utf-8') as stream:
+                stream.write(datetime.now().isoformat(timespec='seconds') + ' ' + detail + '\n')
+            print('Diagnostic log: ' + str(log))
+        except OSError:
+            print('Could not write diagnostic log.')
+    finally:
+        if getattr(sys, 'frozen', False) and '--help' not in sys.argv and '-h' not in sys.argv:
+            try:
+                input('\nPress Enter to close this window...')
+            except (EOFError, KeyboardInterrupt):
+                pass
+
+
 if __name__ == '__main__':
-    main()
+    run_console()
