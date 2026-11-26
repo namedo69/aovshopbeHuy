@@ -38,13 +38,19 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Bridge:
-    def __init__(self, backend, port, state_path):
+    def __init__(self, backend, port, state_path, max_jobs=10):
         if urllib.parse.urlsplit(backend).scheme != 'https':
             raise ValueError('Backend requires HTTPS')
         self.backend = backend.rstrip('/')
         self.engine = f'http://127.0.0.1:{port}'
         self.path = Path(state_path)
         self.state = json.loads(self.path.read_text('utf-8')) if self.path.exists() else {'deviceId': str(uuid.uuid4())}
+        self.max_jobs = max_jobs
+        self.state.setdefault('jobs', {})
+        if self.state.get('active'):
+            old = self.state.pop('active')
+            self.state['jobs'][old['order_id']] = old
+            self.state.pop('claimToken', None)
         self.token = ''
         self.save()
         self.remote = urllib.request.build_opener(NoRedirect())
@@ -119,14 +125,19 @@ class Bridge:
             raise RuntimeError('Report not acknowledged; retaining exact payload')
         self.state.pop('pendingReport')
         if payload['state'] == 'completed':
-            self.state.pop('active', None)
-            self.state.pop('claimToken', None)
+            self.state['jobs'].pop(payload['orderId'], None)
         self.save()
 
     def tick(self):
         self.flush_report()
-        active = self.state.get('active')
-        if not active:
+        for active in list(self.state['jobs'].values()):
+            try:
+                self.process_job(active)
+            except (ApiError, RuntimeError, TimeoutError) as error:
+                print(f"{active['order_id']}: {error}", flush=True)
+                if self.state.get('pendingReport'):
+                    return
+        if len(self.state['jobs']) < self.max_jobs:
             self.validate_engine()
             self.state.setdefault('claimToken', str(uuid.uuid4()))
             self.save()  # persist before any claim request
@@ -138,8 +149,17 @@ class Bridge:
             if job['state'] != 'claimed':
                 raise RuntimeError('Claim already executed; inspect journal before continuing')
             active = dict(job, claimToken=self.state['claimToken'])
-            self.state['active'] = active
+            self.state['jobs'][active['order_id']] = active
+            self.state.pop('claimToken', None)
             self.save()
+            try:
+                self.process_job(active)
+            except (ApiError, RuntimeError, TimeoutError) as error:
+                print(f"{active['order_id']}: {error}", flush=True)
+
+    def process_job(self, active):
+        if active.get('needsReview'):
+            return
         if not active.get('engineId'):
             if active.get('submissionIntent'):
                 raise RuntimeError('Ambiguous engine submission: inspect engine; do not delete journal or retry order')
@@ -165,13 +185,16 @@ class Bridge:
         self.report(active, state, done, stopped)
         print(f"{active['order_id']}: {state} {done}/{active['requested']}", flush=True)
         if state == 'needs_review':
-            raise RuntimeError('Engine stopped before quota: review required; no automatic refund/restart')
+            active['needsReview'] = True
+            self.save()
+            print('Engine stopped before quota: review required; other jobs continue.', flush=True)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--backend', default='https://api.chaysk.com')
     parser.add_argument('--port', type=int, default=18801)
+    parser.add_argument('--max-jobs', type=int, choices=range(1, 11), default=10, help='Maximum simultaneous owned orders (1-10)')
     parser.add_argument('--state', default=str(Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'ChaySKBuffLike' / 'state.json'))
     args = parser.parse_args()
     # OS lock prevents two receivers sharing the same journal.
@@ -187,7 +210,7 @@ def main():
         else:
             import fcntl
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        bridge = Bridge(args.backend, args.port, args.state)
+        bridge = Bridge(args.backend, args.port, args.state, args.max_jobs)
         email = input('Admin email: ').strip()
         password = getpass.getpass('Admin password: ')
         print('Connecting to WEB backend...', flush=True)

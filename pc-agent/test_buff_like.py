@@ -24,7 +24,7 @@ class RecoveryTests(unittest.TestCase):
         restarted = Bridge('https://example.com', 18801, self.path)
         restarted.request = Mock()
         with self.assertRaisesRegex(RuntimeError, 'Ambiguous'):
-            restarted.tick()
+            restarted.process_job(restarted.state['jobs']['order'])
         restarted.request.assert_not_called()
 
     def test_login_error_identifies_web_without_response_secrets(self):
@@ -48,10 +48,9 @@ class RecoveryTests(unittest.TestCase):
     def test_done_below_quota_is_review_not_completion(self):
         self.bridge.state['active']['engineId'] = 'engine'
         self.bridge.request = Mock(side_effect=[{'order_id': 'engine', 'status': 'DONE', 'added_likes': 99}, {'ok': True}])
-        with self.assertRaisesRegex(RuntimeError, 'review required'):
-            self.bridge.tick()
+        self.bridge.process_job(self.bridge.state['active'])
         self.assertEqual(self.bridge.request.call_args.args[1]['state'], 'needs_review')
-        self.assertIn('active', self.bridge.state)
+        self.assertTrue(self.bridge.state['active']['needsReview'])
 
     def test_report_failure_retains_exact_payload_for_restart(self):
         self.bridge.state['active']['engineId'] = 'engine'
@@ -63,7 +62,23 @@ class RecoveryTests(unittest.TestCase):
         restarted.request = Mock(return_value={'ok': True})
         restarted.flush_report()
         restarted.request.assert_called_once_with('/api/v1/admin/buff-like/report', payload)
-        self.assertNotIn('active', restarted.state)
+        self.assertNotIn('order', restarted.state['jobs'])
+
+    def test_completion_keeps_other_job(self):
+        self.bridge.state.pop('active')
+        self.bridge.state['jobs'] = {'one': {'order_id': 'one'}, 'two': {'order_id': 'two'}}
+        self.bridge.state['pendingReport'] = {'orderId': 'one', 'state': 'completed'}
+        self.bridge.request = Mock(return_value={'ok': True})
+        self.bridge.flush_report()
+        self.assertEqual(list(self.bridge.state['jobs']), ['two'])
+
+    def test_two_jobs_polled_independently(self):
+        self.bridge.state.pop('active')
+        self.bridge.max_jobs = 2
+        self.bridge.state['jobs'] = {str(i): {'order_id': str(i)} for i in range(2)}
+        self.bridge.process_job = Mock(side_effect=[RuntimeError('Ambiguous'), None])
+        self.bridge.tick()
+        self.assertEqual(self.bridge.process_job.call_count, 2)
 
 
 if __name__ == '__main__':

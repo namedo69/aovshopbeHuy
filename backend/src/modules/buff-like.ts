@@ -32,7 +32,7 @@ buffLikeRouter.post('/claim', async (req, res) => {
   const client = await sqlClient.connect();
   try {
     await client.query('BEGIN');
-    // One engine slot globally; a disconnected PC retains ownership.
+    // Serialize claims while allowing up to ten owned jobs per PC.
     await client.query('SELECT pg_advisory_xact_lock(741026, 18801)');
     const replay = await client.query('SELECT * FROM buff_like_jobs WHERE claim_token=$1', [data.claimToken]);
     if (replay.rows[0]) {
@@ -42,7 +42,9 @@ buffLikeRouter.post('/claim', async (req, res) => {
       res.json({ job: row });
       return;
     }
-    const busy = await client.query("SELECT 1 FROM buff_like_jobs WHERE state IN ('claimed','running','needs_review') LIMIT 1");
+    const busy = await client.query(`SELECT 1 FROM buff_like_jobs
+      WHERE device_id=$1 AND state IN ('claimed','running','needs_review')
+      HAVING count(*) >= 10`, [data.deviceId]);
     if (busy.rows.length) {
       await client.query('COMMIT');
       res.json({ job: null });
