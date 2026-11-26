@@ -8,6 +8,7 @@ import { AppError, amountSchema, calcDiscount, code, parse, requireAdmin, requir
 import { chungSucClient, extractEventCode } from './chungsuc-adapter.js';
 import { parseGroupChestInput } from './group-chest.js';
 import { buffLikeInput } from './buff-like.js';
+import { requireBuffPosts } from '../lib/buff-scan.js';
 
 export const orderRouter = Router();
 export const adminOrderRouter = Router();
@@ -119,6 +120,7 @@ orderRouter.post('/', async (req, res) => {
       const cleanedInput: Record<string, unknown> = { ...item.customerInput };
       if (isBuffLike) {
         Object.assign(cleanedInput, buffLikeInput(product.input_schema, item.customerInput, item.quantity));
+        await requireBuffPosts(String(cleanedInput.targetName));
       } else if (cleanedInput.productType === 'buff_like') {
         throw new AppError(400, 'INVALID_PRODUCT_TYPE', 'Sản phẩm không phải buff like');
       }

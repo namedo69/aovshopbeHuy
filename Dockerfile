@@ -12,6 +12,7 @@ RUN npm run build
 
 # Production image
 FROM node:24-alpine AS runner
+RUN apk add --no-cache python3 py3-cryptography lz4-libs
 
 WORKDIR /app
 
@@ -22,6 +23,7 @@ ENV PORT=3000
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
+COPY backend/scanner ./scanner
 
 EXPOSE 3000
 
