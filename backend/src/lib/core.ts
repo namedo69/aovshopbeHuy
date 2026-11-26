@@ -23,7 +23,7 @@ export const env = {
 export function assertConfig() {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
   if (env.accessSecret.length < 32) throw new Error('JWT_ACCESS_SECRET must be at least 32 characters');
-  if (env.sepaySecret.length < 16) throw new Error('SEPAY_WEBHOOK_SECRET must be at least 16 characters');
+  if (env.sepaySecret.length < 10) throw new Error('SEPAY_WEBHOOK_SECRET must be at least 10 characters');
 }
 export const code = (prefix: string) => `${prefix}${randomBytes(8).toString('hex').toUpperCase()}`;
 export const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
