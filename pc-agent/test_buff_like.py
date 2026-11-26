@@ -80,6 +80,15 @@ class RecoveryTests(unittest.TestCase):
         self.bridge.tick()
         self.assertEqual(self.bridge.process_job.call_count, 2)
 
+    def test_closed_order_clears_pending_and_only_its_job(self):
+        self.bridge.state.pop('active')
+        self.bridge.state['jobs'] = {'one': {}, 'two': {}}
+        self.bridge.state['pendingReport'] = {'orderId': 'one', 'state': 'running'}
+        self.bridge.request = Mock(return_value={'ok': True, 'closed': True, 'orderStatus': 'refunded'})
+        self.bridge.flush_report()
+        self.assertNotIn('pendingReport', self.bridge.state)
+        self.assertEqual(list(self.bridge.state['jobs']), ['two'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -124,7 +124,9 @@ class Bridge:
         if not isinstance(result, dict) or result.get('ok') is not True:
             raise RuntimeError('Report not acknowledged; retaining exact payload')
         self.state.pop('pendingReport')
-        if payload['state'] == 'completed':
+        if result.get('closed') is True:
+            print(f"{payload['orderId']}: WEB order closed ({result.get('orderStatus')}). Removed from receiver; verify this order is stopped in engine.", flush=True)
+        if payload['state'] == 'completed' or result.get('closed') is True:
             self.state['jobs'].pop(payload['orderId'], None)
         self.save()
 

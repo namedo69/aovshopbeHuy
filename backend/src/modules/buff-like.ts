@@ -42,8 +42,8 @@ buffLikeRouter.post('/claim', async (req, res) => {
       res.json({ job: row });
       return;
     }
-    const busy = await client.query(`SELECT 1 FROM buff_like_jobs
-      WHERE device_id=$1 AND state IN ('claimed','running','needs_review')
+    const busy = await client.query(`SELECT 1 FROM buff_like_jobs b JOIN orders o ON o.id=b.order_id
+      WHERE b.device_id=$1 AND b.state IN ('claimed','running','needs_review') AND o.status='processing'
       HAVING count(*) >= 10`, [data.deviceId]);
     if (busy.rows.length) {
       await client.query('COMMIT');
@@ -85,6 +85,11 @@ buffLikeRouter.post('/report', async (req, res) => {
     const row = result.rows[0];
     if (!row || row.admin_id !== req.user!.id || row.device_id !== data.deviceId || row.claim_token !== data.claimToken) {
       throw new AppError(409, 'CLAIM_CONFLICT', 'PC không sở hữu đơn này');
+    }
+    if (['refunded', 'cancelled'].includes(row.order_status)) {
+      await client.query('COMMIT');
+      res.json({ ok: true, closed: true, orderStatus: row.order_status });
+      return;
     }
     if (data.done < row.done || data.done > row.requested ||
         (row.engine_order_id && row.engine_order_id !== data.engineOrderId) ||
