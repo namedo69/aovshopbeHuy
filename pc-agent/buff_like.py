@@ -1,6 +1,7 @@
 """chaysk.com -> original AutoBuffDoHot (4) localhost API. Python stdlib only."""
 import argparse
 import getpass
+import http.client
 import json
 import os
 import ssl
@@ -16,7 +17,15 @@ import uuid
 
 
 class ApiError(RuntimeError):
-    pass
+    def __init__(self, message, *, engine=False, status=None, transient=False):
+        super().__init__(message)
+        self.engine = engine
+        self.status = status
+        self.transient = transient
+
+    @property
+    def reconnect_web(self):
+        return not self.engine and (self.transient or self.status == 401)
 
 
 def describe_network_error(error):
@@ -85,11 +94,12 @@ class Bridge:
             }.get(exc.code, 'Server returned an error.')
             status = exc.code
             exc.close()
-            raise ApiError(f'{source} {path}: HTTP {status}. {hint}') from None
-        except (urllib.error.URLError, OSError) as exc:
-            raise ApiError(f'{source} {path}: {describe_network_error(exc)}') from None
+            raise ApiError(f'{source} {path}: HTTP {status}. {hint}', engine=engine,
+                           status=status, transient=status in (408, 425, 429, 500, 502, 503, 504)) from None
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+            raise ApiError(f'{source} {path}: {describe_network_error(exc)}', engine=engine, transient=True) from None
         except (ValueError, UnicodeError):
-            raise ApiError(f'{source} {path}: response is not valid JSON; check API address.') from None
+            raise ApiError(f'{source} {path}: response is not valid JSON; check API address.', engine=engine, transient=not engine) from None
         if not isinstance(result, (dict, list)) or (isinstance(result, dict) and result.get('ok') is False):
             raise RuntimeError('Invalid API response')
         return result
@@ -136,6 +146,8 @@ class Bridge:
             try:
                 self.process_job(active)
             except (ApiError, RuntimeError, TimeoutError) as error:
+                if isinstance(error, ApiError) and error.reconnect_web:
+                    raise
                 print(f"{active['order_id']}: {error}", flush=True)
                 if self.state.get('pendingReport'):
                     return
@@ -157,6 +169,8 @@ class Bridge:
             try:
                 self.process_job(active)
             except (ApiError, RuntimeError, TimeoutError) as error:
+                if isinstance(error, ApiError) and error.reconnect_web:
+                    raise
                 print(f"{active['order_id']}: {error}", flush=True)
 
     def process_job(self, active):
@@ -192,6 +206,36 @@ class Bridge:
             print('Engine stopped before quota: review required; other jobs continue.', flush=True)
 
 
+def receive_loop(bridge, email, password):
+    """Retry only safe web operations; claim tokens/reports remain persisted."""
+    logged_in = None
+    retry_delay = 5
+    while True:
+        try:
+            if logged_in is None or time.monotonic() - logged_in > 600:
+                logged_in = None
+                bridge.login(email, password)
+                logged_in = time.monotonic()
+                print('WEB login OK (admin). Connected/reconnected.', flush=True)
+            bridge.tick()
+            retry_delay = 5
+        except ApiError as error:
+            if not error.reconnect_web:
+                raise
+            # A real login rejection is not a deployment outage. Avoid endless
+            # password retries; an expired token on other routes gets one login.
+            if error.status == 401 and logged_in is None:
+                raise
+            if error.status == 401:
+                logged_in = None
+                bridge.token = ''
+            print(f'WEB temporarily disconnected: {error}. Retry in {retry_delay}s; journal retained.', flush=True)
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 30)
+            continue
+        time.sleep(5)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--backend', default='https://api.chaysk.com')
@@ -216,20 +260,10 @@ def main():
         email = input('Admin email: ').strip()
         password = getpass.getpass('Admin password: ')
         print('Connecting to WEB backend...', flush=True)
-        bridge.login(email, password)
-        print('WEB login OK (admin). Checking ENGINE localhost port ' + str(args.port) + '...', flush=True)
+        print('Checking ENGINE localhost port ' + str(args.port) + '...', flush=True)
         bridge.validate_engine()
         print('Connected. Ctrl+C stops receiver, not the engine. Keep journal for recovery.')
-        logged_in = time.monotonic()
-        while True:
-            try:
-                if time.monotonic() - logged_in > 600:
-                    bridge.login(email, password)
-                    logged_in = time.monotonic()
-                bridge.tick()
-            except (urllib.error.URLError, TimeoutError):
-                print('Connection interrupted; retaining journal. Retry in 5 seconds.')
-            time.sleep(5)
+        receive_loop(bridge, email, password)
 
 
 def run_console():

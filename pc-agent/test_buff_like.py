@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import Mock
 from unittest.mock import patch
 import urllib.error
-from buff_like import ApiError, run_console
+from buff_like import ApiError, run_console, receive_loop
 from buff_like import Bridge
 
 
@@ -88,6 +88,61 @@ class RecoveryTests(unittest.TestCase):
         self.bridge.flush_report()
         self.assertNotIn('pendingReport', self.bridge.state)
         self.assertEqual(list(self.bridge.state['jobs']), ['two'])
+
+    def test_web_deploy_retries_report_without_losing_payload(self):
+        self.bridge.state.pop('active')
+        payload = {'orderId': 'one', 'state': 'running'}
+        self.bridge.state['pendingReport'] = payload
+        self.bridge.save()
+        self.bridge.request = Mock(side_effect=[ApiError('502', status=502, transient=True), {'ok': True}])
+        self.bridge.tick = self.bridge.flush_report
+        self.bridge.login = Mock()
+        with patch('buff_like.time.sleep', side_effect=[None, KeyboardInterrupt]):
+            with self.assertRaises(KeyboardInterrupt):
+                receive_loop(self.bridge, 'email', 'password')
+        self.assertEqual(self.bridge.request.call_count, 2)
+        self.assertEqual(self.bridge.request.call_args_list[0], self.bridge.request.call_args_list[1])
+        self.assertNotIn('pendingReport', self.bridge.state)
+
+    def test_expired_session_logs_in_again(self):
+        bridge = Mock()
+        bridge.tick.side_effect = [ApiError('expired', status=401), KeyboardInterrupt]
+        with patch('buff_like.time.sleep'):
+            with self.assertRaises(KeyboardInterrupt):
+                receive_loop(bridge, 'email', 'password')
+        self.assertEqual(bridge.login.call_count, 2)
+
+    def test_wrong_password_does_not_retry_forever(self):
+        bridge = Mock()
+        bridge.login.side_effect = ApiError('wrong password', status=401)
+        with patch('buff_like.time.sleep') as wait:
+            with self.assertRaises(ApiError):
+                receive_loop(bridge, 'email', 'password')
+        wait.assert_not_called()
+
+    def test_engine_submission_remains_uncertain_after_network_failure(self):
+        active = self.bridge.state['active']
+        active.pop('submissionIntent')
+        self.bridge.validate_engine = Mock()
+        self.bridge.request = Mock(side_effect=ApiError('engine reset', engine=True, transient=True))
+        with self.assertRaises(ApiError):
+            self.bridge.process_job(active)
+        with self.assertRaisesRegex(RuntimeError, 'Ambiguous'):
+            self.bridge.process_job(active)
+        self.assertEqual(self.bridge.request.call_count, 1)
+
+    def test_uncertain_web_claim_reuses_saved_token(self):
+        self.bridge.state.pop('active')
+        self.bridge.validate_engine = Mock()
+        self.bridge.request = Mock(side_effect=ApiError('deploy', status=503, transient=True))
+        with self.assertRaises(ApiError):
+            self.bridge.tick()
+        first_payload = self.bridge.request.call_args.args[1]
+        restarted = Bridge('https://example.com', 18801, self.path)
+        restarted.validate_engine = Mock()
+        restarted.request = Mock(return_value={'job': None})
+        restarted.tick()
+        self.assertEqual(first_payload, restarted.request.call_args.args[1])
 
 
 if __name__ == '__main__':
