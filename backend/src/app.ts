@@ -15,6 +15,7 @@ import { tierRouter, adminTierRouter } from './modules/tiers.js';
 import { adminProviderRouter } from './modules/admin-providers.js';
 import { groupChestRouter } from './modules/group-chest.js';
 import { AppError, allowedOrigins } from './lib/core.js';
+import { buffLikeRouter, buffLikeCustomerRouter } from './modules/buff-like.js';
 
 export const app = express();
 app.set('trust proxy', 1);
@@ -64,6 +65,8 @@ app.use('/api/v1/admin/users', adminUserRouter);
 app.use('/api/v1/tiers', tierRouter);
 app.use('/api/v1/admin/tiers', adminTierRouter);
 app.use('/api/v1/admin/providers', adminProviderRouter);
+app.use('/api/v1/admin/buff-like', buffLikeRouter);
+app.use('/api/v1/buff-like', buffLikeCustomerRouter);
 app.use('/api/v1/group-chest', groupChestRouter);
 app.use((_req, _res, next) => next(new AppError(404, 'NOT_FOUND', 'Không tìm thấy đường dẫn')));
 app.use((error: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {

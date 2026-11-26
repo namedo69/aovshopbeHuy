@@ -8,3 +8,4 @@ backend/*.db-*
 pc-agent/.env
 pc-agent/dist/
 pc-agent/node_modules/
+__pycache__/

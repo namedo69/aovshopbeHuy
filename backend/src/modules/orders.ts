@@ -7,6 +7,7 @@ import { sqlClient } from '../db/sql.js';
 import { AppError, amountSchema, calcDiscount, code, parse, requireAdmin, requireUser, sha256 } from '../lib/core.js';
 import { chungSucClient, extractEventCode } from './chungsuc-adapter.js';
 import { parseGroupChestInput } from './group-chest.js';
+import { buffLikeInput } from './buff-like.js';
 
 export const orderRouter = Router();
 export const adminOrderRouter = Router();
@@ -105,10 +106,22 @@ orderRouter.post('/', async (req, res) => {
       if (!product) throw new AppError(400, 'INVALID_PRODUCT', 'Sản phẩm không khả dụng');
 
       const mapping = await client.query('SELECT 1 FROM provider_products pp JOIN providers p ON p.id=pp.provider_id WHERE pp.product_id=$1 AND pp.is_active=true AND p.is_active=true LIMIT 1', [item.productId]);
-      if (mapping.rows[0] || isChungSucActive || item.customerInput.productType === 'group_chest_open') hasAnyProvider = true;
+      const isBuffLike = product.input_schema?.productType === 'buff_like';
+      if (isBuffLike && (item.quantity < product.min_quantity || item.quantity > product.max_quantity)) {
+        throw new AppError(400, 'INVALID_QUANTITY', 'Số gói nằm ngoài giới hạn sản phẩm');
+      }
+      if (isBuffLike && (input.items.length !== 1 || input.splitOrders)) {
+        throw new AppError(400, 'SINGLE_BUFF_LIKE_ORDER', 'Mỗi đơn buff like chỉ gồm một nhân vật và một gói');
+      }
+      if (!isBuffLike && (mapping.rows[0] || isChungSucActive || item.customerInput.productType === 'group_chest_open')) hasAnyProvider = true;
 
       // Chuẩn hóa và làm sạch mã sự kiện trong customerInput
       const cleanedInput: Record<string, unknown> = { ...item.customerInput };
+      if (isBuffLike) {
+        Object.assign(cleanedInput, buffLikeInput(product.input_schema, item.customerInput, item.quantity));
+      } else if (cleanedInput.productType === 'buff_like') {
+        throw new AppError(400, 'INVALID_PRODUCT_TYPE', 'Sản phẩm không phải buff like');
+      }
       if (cleanedInput.productType === 'group_chest_open') {
         if (!parseGroupChestInput(cleanedInput)) throw new AppError(400, 'INVALID_GROUP_CHEST_INPUT', 'Danh sách Mở rương nhóm không hợp lệ');
       }
@@ -291,6 +304,10 @@ orderRouter.post('/', async (req, res) => {
     }
 
     for (const line of lines) {
+      if (line.customerInput.productType === 'buff_like') {
+        await client.query('INSERT INTO buff_like_jobs(order_id,target_name,requested) VALUES($1,$2,$3)',
+          [order.id, line.customerInput.targetName, line.customerInput.requested]);
+      }
       if (line.customerInput.productType === 'group_chest_open') {
         await insertGroupChestJob(client, order.id, line.productId, line.customerInput);
       }

@@ -125,6 +125,21 @@ export const auditLogs = pgTable('audit_logs', {
   targetId: text('target_id').notNull(), metadata: json('metadata'), createdAt: created(),
 });
 
+export const buffLikeJobs = pgTable('buff_like_jobs', {
+  orderId: uuid('order_id').primaryKey().references(() => orders.id),
+  targetName: text('target_name').notNull(),
+  requested: integer('requested').notNull(),
+  done: integer('done').notNull().default(0),
+  state: text('state').notNull().default('queued'),
+  deviceId: uuid('device_id'),
+  claimToken: uuid('claim_token').unique(),
+  adminId: uuid('admin_id').references(() => users.id),
+  engineOrderId: text('engine_order_id'),
+  engineStopped: boolean('engine_stopped').notNull().default(false),
+  createdAt: created(),
+  updatedAt: updated(),
+}, t => [index('buff_like_queue_idx').on(t.state, t.createdAt)]);
+
 export const workerAgents = pgTable('worker_agents', {
   id: id(),
   agentCode: text('agent_code').notNull().unique(),
