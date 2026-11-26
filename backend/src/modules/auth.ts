@@ -27,9 +27,6 @@ async function issueSession(user: typeof users.$inferSelect, req: import('expres
   await db.insert(refreshSessions).values({ userId: user.id, tokenHash: sha256(refresh), expiresAt: new Date(Date.now() + 30 * 86400_000), ip: req.ip, userAgent: req.header('user-agent') });
   res.cookie(cookieName, refresh, cookieOptions());
 
-  // Lấy thông tin tier
-  const tierResult = await db.query?.userTiers?.findFirst?.({ where: eq(userTiers.id, user.tierId ?? '') }) ?? null;
-
   return {
     accessToken: await accessToken(user.id, user.role),
     user: {
@@ -45,7 +42,9 @@ authRouter.post('/register', async (req, res) => {
   const data = parse(registration, req.body);
   const hash = await argon2.hash(data.password, { type: argon2.argon2id });
   const result = await db.transaction(async tx => {
-    const [user] = await tx.insert(users).values({ email: data.email, passwordHash: hash, name: data.name, tierId: 'tier_member' }).onConflictDoNothing().returning();
+    const [defaultTier] = await tx.select({ id: userTiers.id }).from(userTiers)
+      .where(and(eq(userTiers.isDefault, true), eq(userTiers.isActive, true))).limit(1);
+    const [user] = await tx.insert(users).values({ email: data.email, passwordHash: hash, name: data.name, tierId: defaultTier?.id ?? null }).onConflictDoNothing().returning();
     if (!user) throw new AppError(409, 'EMAIL_EXISTS', 'Email đã được sử dụng');
     await tx.insert(wallets).values({ userId: user.id, balanceAmount: 0 });
     return user;
