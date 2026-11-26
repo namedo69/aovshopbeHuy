@@ -17,6 +17,8 @@ const productBaseSchema = z.object({
   isActive: z.boolean().default(true), sortOrder: z.number().int().default(0),
 });
 const productInput = productBaseSchema.refine(x => x.maxQuantity >= x.minQuantity && (!x.salePriceAmount || x.salePriceAmount <= x.priceAmount));
+// Zod defaults inside partial objects can populate omitted fields. A PATCH
+// must update only keys actually supplied, preserving the product's schema.
 const productUpdateSchema = productBaseSchema.partial();
 productRouter.get('/', async (_req, res) => res.json(await db.select().from(products).where(eq(products.isActive, true)).orderBy(products.sortOrder).limit(1000)));
 productRouter.get('/:slug', async (req, res) => {
@@ -33,6 +35,9 @@ adminProductRouter.post('/', async (req, res) => {
 });
 adminProductRouter.patch('/:id', async (req, res) => {
   const input = parse(productUpdateSchema, req.body);
+  for (const key of Object.keys(input)) {
+    if (!Object.prototype.hasOwnProperty.call(req.body, key)) delete (input as Record<string, unknown>)[key];
+  }
   const [row] = await db.update(products).set({ ...input, updatedAt: new Date() }).where(eq(products.id, String(req.params.id))).returning();
   if (!row) throw new AppError(404, 'NOT_FOUND', 'Không tìm thấy sản phẩm');
   await db.insert(auditLogs).values({ actorId: req.user!.id, action: 'product.update', targetType: 'product', targetId: row.id, metadata: input });
