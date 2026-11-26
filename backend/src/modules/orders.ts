@@ -14,6 +14,25 @@ export const orderRouter = Router();
 export const adminOrderRouter = Router();
 export const walletRouter = Router();
 
+// One unfinished buff-like order per character. The advisory lock serializes
+// concurrent checkouts for the same name so two orders cannot slip through.
+async function assertBuffTargetAvailable(
+  client: { query: <T extends Record<string, any> = Record<string, any>>(source: string, values?: any[]) => Promise<{ rows: T[] }> },
+  targetName: string,
+) {
+  await client.query('SELECT pg_advisory_xact_lock(741027, hashtext($1::text))', [targetName]);
+  const existing = await client.query<{ order_code: string; state: string }>(
+    `SELECT o.order_code, b.state FROM buff_like_jobs b JOIN orders o ON o.id=b.order_id
+     WHERE b.target_name=$1 AND o.status NOT IN ('completed','refunded','cancelled')
+     ORDER BY b.created_at LIMIT 1`,
+    [targetName],
+  );
+  const open = existing.rows[0];
+  if (open) {
+    throw new AppError(409, 'BUFF_TARGET_IN_PROGRESS', `Nhân vật "${targetName}" đang có đơn chưa hoàn tất (${open.order_code}). Vui lòng chờ đơn đó xong rồi đặt lại.`);
+  }
+}
+
 async function insertGroupChestJob(
   client: { query: <T extends Record<string, any> = Record<string, any>>(source: string, values?: any[]) => Promise<{ rows: T[] }> },
   orderId: string,
@@ -120,6 +139,7 @@ orderRouter.post('/', async (req, res) => {
       const cleanedInput: Record<string, unknown> = { ...item.customerInput };
       if (isBuffLike) {
         Object.assign(cleanedInput, buffLikeInput(product.input_schema, item.customerInput, item.quantity));
+        await assertBuffTargetAvailable(client, String(cleanedInput.targetName));
         await requireBuffPosts(String(cleanedInput.targetName));
       } else if (cleanedInput.productType === 'buff_like') {
         throw new AppError(400, 'INVALID_PRODUCT_TYPE', 'Sản phẩm không phải buff like');
